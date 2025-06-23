@@ -17,15 +17,15 @@ import Supabase
 
  */
 
-enum BluebirdServiceError: Error {
+enum BluebirdServiceError: LocalizedError {
     case missingRefreshToken
     case invalidURLComponents(url: URL)
     case invalidURL
     case invalidHTTPResponse
-    case decodingError(forRequest: String)
+    case decodingError(error: Error, forRequest: String)
     case unexpectedResponseCode(forRequest: String, responseCode: Int)
     case networkError(error: Error)
-    var errorDescription: String {
+    var errorDescription: String? {
         switch self {
         case .missingRefreshToken:
             return "Error: no refresh token present"
@@ -35,8 +35,8 @@ enum BluebirdServiceError: Error {
             return "Error: invalid URL"
         case .invalidHTTPResponse:
             return "Error: invalid HTTP Response"
-        case let .decodingError(forRequest):
-            return "Error: unable to decode response for \(forRequest)"
+        case let .decodingError(error, forRequest):
+            return "Decoding Error: \(error.localizedDescription) \(forRequest)"
         case let .unexpectedResponseCode(forRequest, responseCode):
             return "Error: unhandled response code for \(forRequest) (got \(responseCode))"
         case let .networkError(error):
@@ -179,19 +179,26 @@ struct BluebirdService: AsyncParsableCommand {
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw BluebirdServiceError.invalidHTTPResponse
             }
+            if let responseString = String(data: data, encoding: .utf8) {
+                print("Response Body (String):")
+                print(responseString)
+            } else {
+                print(
+                    "Response Body (Data - could not decode as UTF-8): \(data.base64EncodedString())"
+                )
+            }
+
             switch httpResponse.statusCode {
             case 200:
                 struct RefreshTokenResponse: Decodable {
                     let accessToken: String
                     let tokenType: String
-                    let expiresIn: String
-                    let refreshToken: String
+                    let expiresIn: Int
                     let scope: String
                     enum CodingKeys: String, CodingKey {
                         case accessToken = "access_token"
                         case tokenType = "token_type"
                         case expiresIn = "expires_in"
-                        case refreshToken = "refresh_token"
                         case scope
                     }
                 }
@@ -202,7 +209,9 @@ struct BluebirdService: AsyncParsableCommand {
                     )
                     return refreshTokenResponse.accessToken
                 } catch {
-                    throw BluebirdServiceError.decodingError(forRequest: "RefreshToken")
+                    throw BluebirdServiceError.decodingError(
+                        error: error, forRequest: "RefreshToken"
+                    )
                 }
             default:
                 throw BluebirdServiceError.unexpectedResponseCode(
