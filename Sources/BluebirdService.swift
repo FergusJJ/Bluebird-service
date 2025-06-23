@@ -130,19 +130,26 @@ struct BluebirdService: AsyncParsableCommand {
         }
         // user_song_plays uses id as key so need dict of id:accessToken
         var UserIdAccessToken: [String: String?] = [:]
-
-        // once fetched profiles need to fetch all songs since last fetch for user
-        for profile in spotifyProfiles {
-            do {
-                print("Fetching Access Token for: \(profile.SpotifyUID ?? "")")
-                // let accessToken = try await getAccessTokens(spotify: profile)
-                let accessToken = try await getAccessTokens(spotify: profile)
-                UserIdAccessToken.updateValue(accessToken, forKey: profile.Id)
-            } catch {
-                print(error.localizedDescription)
-                continue
+        await withTaskGroup(of: (String, String?).self) { group in
+            for profile in spotifyProfiles {
+                group.addTask {
+                    do {
+                        print("Fetching Access Token for: \(profile.SpotifyUID ?? "")")
+                        // let accessToken = try await getAccessTokens(spotify: profile)
+                        let accessToken = try await getAccessTokens(spotify: profile)
+                        return (profile.Id, accessToken)
+                    } catch {
+                        print(error.localizedDescription)
+                        return (profile.Id, nil)
+                    }
+                }
+            }
+            for await (profileId, accessToken) in group {
+                UserIdAccessToken.updateValue(accessToken, forKey: profileId)
             }
         }
+
+        // once fetched profiles need to fetch all songs since last fetch for user
     }
 
     private func getRefreshTokens(client: SupabaseClient) async throws -> [Spotify] {
