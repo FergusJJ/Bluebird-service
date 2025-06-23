@@ -128,13 +128,16 @@ struct BluebirdService: AsyncParsableCommand {
             print("Error fetching Spotify profiles: \(error)")
             return
         }
+        // user_song_plays uses id as key so need dict of id:accessToken
+        var UserIdAccessToken: [String: String?] = [:]
 
         // once fetched profiles need to fetch all songs since last fetch for user
         for profile in spotifyProfiles {
             do {
                 print("Fetching Access Token for: \(profile.SpotifyUID ?? "")")
                 // let accessToken = try await getAccessTokens(spotify: profile)
-                let _ = try await getAccessTokens(spotify: profile)
+                let accessToken = try await getAccessTokens(spotify: profile)
+                UserIdAccessToken.updateValue(accessToken, forKey: profile.Id)
             } catch {
                 print(error.localizedDescription)
                 continue
@@ -155,37 +158,23 @@ struct BluebirdService: AsyncParsableCommand {
         guard let refreshToken: String = spotify.RefreshToken else {
             throw BluebirdServiceError.missingRefreshToken
         }
-        guard var components = URLComponents(url: spotifyRefreshURL, resolvingAgainstBaseURL: true)
-        else {
-            throw BluebirdServiceError.invalidURLComponents(url: spotifyRefreshURL)
-        }
-        let refreshPath = "/api/token"
-        components.path = refreshPath
-        guard let url = components.url else {
-            throw BluebirdServiceError.invalidURL
+        var request: URLRequest
+        do {
+            request = try createRefreshTokenRequest()
+        } catch {
+            throw error
         }
         let requestData = createRequestBody(params: [
             "grant_type": "refresh_token",
             "refresh_token": refreshToken,
             "client_id": spotifyClientID,
         ])
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
         request.httpBody = requestData.data(using: .utf8)
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.setValue(createbasicAuthHeader(), forHTTPHeaderField: "Authorization")
+
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw BluebirdServiceError.invalidHTTPResponse
-            }
-            if let responseString = String(data: data, encoding: .utf8) {
-                print("Response Body (String):")
-                print(responseString)
-            } else {
-                print(
-                    "Response Body (Data - could not decode as UTF-8): \(data.base64EncodedString())"
-                )
             }
 
             switch httpResponse.statusCode {
@@ -202,7 +191,6 @@ struct BluebirdService: AsyncParsableCommand {
                         case scope
                     }
                 }
-
                 do {
                     let refreshTokenResponse = try JSONDecoder().decode(
                         RefreshTokenResponse.self, from: data
@@ -225,6 +213,24 @@ struct BluebirdService: AsyncParsableCommand {
             }
             throw error
         }
+    }
+
+    public func createRefreshTokenRequest() throws -> URLRequest {
+        guard var components = URLComponents(url: spotifyRefreshURL, resolvingAgainstBaseURL: true)
+        else {
+            throw BluebirdServiceError.invalidURLComponents(url: spotifyRefreshURL)
+        }
+        let refreshPath = "/api/token"
+        components.path = refreshPath
+        guard let url = components.url else {
+            throw BluebirdServiceError.invalidURL
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue(createbasicAuthHeader(), forHTTPHeaderField: "Authorization")
+        return request
     }
 
     public func createbasicAuthHeader() -> String {
