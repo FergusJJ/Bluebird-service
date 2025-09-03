@@ -182,6 +182,7 @@ struct BluebirdService: AsyncParsableCommand {
         let now = Date()
         let trackIDsPlayedAt: [(String, String)]
         let trackIDs: [String]
+        let artistIDs: [String]
         do {
             let result = try await getRecentlyPlayedTracks(
                 clientAccessToken: clientAccessToken,
@@ -196,6 +197,8 @@ struct BluebirdService: AsyncParsableCommand {
                 trackIDs = recentlyPlayedTracks.items.compactMap { item in
                     seenTrackIDs.insert(item.track.id).inserted ? item.track.id : nil
                 }
+                artistIDs = Array(
+                    Set(recentlyPlayedTracks.items.flatMap { $0.track.artists }.map { $0.id }))
             case let .failure(error):
                 print(error.localizedDescription)
                 return
@@ -213,6 +216,17 @@ struct BluebirdService: AsyncParsableCommand {
             unseenTrackIDs = unseenTrackIDSArr.joined(separator: ",")
         } catch {
             print("Error fetching existing trackIDs \(error.localizedDescription)")
+            return
+        }
+
+        let unseenArtistIDs: String
+        do {
+            let unseenArtistIDsArr = try await Database.getExistingArtistIDs(
+                client: client, artists: artistIDs
+            )
+            unseenArtistIDs = unseenArtistIDsArr.joined(separator: ",")
+        } catch {
+            print("Error fetching existing artistIDs \(error.localizedDescription)")
             return
         }
 
@@ -237,19 +251,96 @@ struct BluebirdService: AsyncParsableCommand {
             return
         }
 
+        let artists: [SpotifyArtist]
+        do {
+            let result = try await getArtistDataMulti(
+                accessToken: clientAccessToken, artistIDs: unseenArtistIDs
+            )
+            switch result {
+            case let .success(isArtistData):
+                guard let artistData = isArtistData else {
+                    artists = []
+                    break
+                }
+                artists = artistData.artists.map { $0 }
+            case let .failure(error):
+                print(error.localizedDescription)
+                return
+            }
+        } catch {
+            print(error)
+            return
+        }
+
         let userSongData = prepareUserSongPlaysData(
             spotifyResponse: trackIDsPlayedAt, userId: clientID
         )
         let tracksData = prepareTracksData(spotifyResponse: tracks)
-
+        let artistsData = prepareArtistsData(spotifyResponse: artists)
         do {
             try await Database.insertUserSongPlays(
                 client: client, userPlaysData: userSongData, unseenTracksData: tracksData,
+                unseenArtistsData: artistsData,
                 userID: clientID, currentFetchTs: now
             )
         } catch {
             print(error)
             return
+        }
+    }
+
+    private func getArtistDataMulti(accessToken: String, artistIDs: String) async throws -> Result<
+        SpotifyGetArtistsMultiResponse?, BluebirdServiceError
+    > {
+        guard !artistIDs.isEmpty else {
+            return .success(nil)
+        }
+        var request: URLRequest
+        do {
+            request =
+                try createGetArtistDataMultiRequest(
+                    accessToken: accessToken,
+                    artists: artistIDs
+                )
+        } catch {
+            throw error
+        }
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw BluebirdServiceError.invalidHTTPResponse
+            }
+
+            switch httpResponse.statusCode {
+            case 200:
+                do {
+                    let spotifyGetArtistsMultiResponse = try JSONDecoder().decode(
+                        SpotifyGetArtistsMultiResponse.self, from: data
+                    )
+                    return .success(spotifyGetArtistsMultiResponse)
+                } catch {
+                    throw BluebirdServiceError.decodingError(
+                        error: error,
+                        forRequest: "getArtistDataMulti - \(httpResponse.statusCode)"
+                    )
+                }
+            default:
+                do {
+                    let spotifyErrorResponse = try JSONDecoder().decode(
+                        SpotifyErrorResponse.self, from: data
+                    )
+                    return .failure(
+                        BluebirdServiceError.spotifyAPIError(
+                            message: spotifyErrorResponse.message,
+                            responseCode: spotifyErrorResponse.status
+                        ))
+                } catch {
+                    throw BluebirdServiceError.decodingError(
+                        error: error,
+                        forRequest: "getArtistDataMulti - \(httpResponse.statusCode)"
+                    )
+                }
+            }
         }
     }
 
@@ -421,6 +512,28 @@ struct BluebirdService: AsyncParsableCommand {
         }
     }
 
+    public func createGetArtistDataMultiRequest(accessToken: String, artists: String) throws
+        -> URLRequest
+    {
+        guard var components = URLComponents(url: spotifySongsURL, resolvingAgainstBaseURL: true)
+        else {
+            throw BluebirdServiceError.invalidURLComponents(url: spotifySongsURL)
+        }
+        let recentlyPlayedPath = "/v1/artists"
+        components.path = recentlyPlayedPath
+        let queryItems = [
+            URLQueryItem(name: "ids", value: artists),
+        ]
+        components.queryItems = queryItems
+        guard let url = components.url else {
+            throw BluebirdServiceError.invalidURL
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        return request
+    }
+
     public func createGetTrackDataMultiRequest(accessToken: String, tracks: String) throws
         -> URLRequest
     {
@@ -497,15 +610,33 @@ struct BluebirdService: AsyncParsableCommand {
         }
     }
 
+    func prepareArtistsData(spotifyResponse: [SpotifyArtist]) -> [Database.Artist] {
+        return spotifyResponse.compactMap { artist in
+            Database.Artist(
+                id: artist.id,
+                name: artist.name,
+                image_url: artist.images?.first?.url ?? "",
+                genres: artist.genres ?? []
+            )
+        }
+    }
+
     func prepareTracksData(spotifyResponse: [SpotifyItem]) -> [Database.Track] {
         return spotifyResponse.compactMap { track in
-            let artists = track.artists.map { $0.name }.joined(separator: ", ")
+            let databaseArtists = track.artists.map { artist in
+                Database.Artist(
+                    id: artist.id,
+                    name: artist.name,
+                    image_url: "",
+                    genres: []
+                )
+            }
             let albumCoverURL = track.album.images.first?.url
             let spotifyURL = track.externalUrls.spotify
             return Database.Track(
                 id: track.id,
                 name: track.name,
-                artist_name: artists,
+                artists: databaseArtists,
                 album_name: track.album.name,
                 duration_ms: track.durationMs,
                 album_cover_url: albumCoverURL,

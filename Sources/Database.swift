@@ -31,7 +31,9 @@ enum Database {
     struct BulkInsertResponse: Decodable {
         let status: String
         let error: String?
+        let artists_inserted: Int
         let tracks_inserted: Int
+        let links_inserted: Int
         let plays_inserted: Int
         let message: String?
     }
@@ -39,13 +41,20 @@ enum Database {
     struct Track: Encodable {
         let id: String
         let name: String
-        let artist_name: String
+        let artists: [Artist]
         let album_name: String
         let duration_ms: Int
         let album_cover_url: String?
         let spotify_url: String?
         let added_at: Date?
         let last_updated_at: Date?
+    }
+
+    struct Artist: Encodable {
+        let id: String
+        let name: String
+        let image_url: String
+        let genres: [String]
     }
 
     struct UserSongPlay: Encodable {
@@ -82,6 +91,23 @@ enum Database {
         return rows.first?.plays_last_fetched.map { Int($0.timeIntervalSince1970 * 1000) }
     }
 
+    static func getExistingArtistIDs(client: SupabaseClient, artists: [String]) async throws
+        -> [String]
+    {
+        struct Response: Decodable {
+            let id: String
+        }
+        let rows: [Response] =
+            try await client
+                .from("artists")
+                .select("id")
+                .in("id", values: artists)
+                .execute()
+                .value
+        let existingIDs = Set(rows.map { $0.id })
+        return artists.filter { !existingIDs.contains($0) }
+    }
+
     static func getExistingTrackIDs(client: SupabaseClient, tracks: [String]) async throws
         -> [String]
     {
@@ -103,41 +129,46 @@ enum Database {
         client: SupabaseClient,
         userPlaysData: [UserSongPlay],
         unseenTracksData: [Track],
+        unseenArtistsData: [Artist],
         userID: String,
         currentFetchTs: Date
     ) async throws {
-        guard !userPlaysData.isEmpty else {
-            print("No new user song plays to insert")
+        guard !userPlaysData.isEmpty || !unseenTracksData.isEmpty || !unseenArtistsData.isEmpty
+        else {
+            print("No new data to insert")
             return
         }
 
-        let userPlaysJSON = userPlaysData.map { play in
-            [
-                "user_id": play.user_id,
-                "track_id": play.track_id,
-                "played_at": play.played_at,
-            ]
+        let userPlaysJSON = userPlaysData.map {
+            ["user_id": $0.user_id, "track_id": $0.track_id, "played_at": $0.played_at]
         }
 
-        let tracksJSON = unseenTracksData.map { track in
-            let album_cover_url = track.album_cover_url ?? ""
-            let spotify_url = track.spotify_url ?? ""
+        let unseenArtistsJSON = unseenArtistsData.map { artist in
+            [
+                "id": artist.id,
+                "name": artist.name,
+                "image_url": artist.image_url,
+                "genres": artist.genres,
+            ] as [String: Any]
+        }
+
+        let unseenTracksJSON = unseenTracksData.map { track in
+            let artistsPayload = track.artists.map { ["id": $0.id, "name": $0.name] }
             return [
                 "id": track.id,
                 "name": track.name,
-                "artist_name": track.artist_name,
+                "artists": artistsPayload,
                 "album_name": track.album_name,
                 "duration_ms": track.duration_ms,
-                "album_cover_url": album_cover_url,
-                "spotify_url": spotify_url,
-            ]
+                "album_cover_url": track.album_cover_url ?? "",
+                "spotify_url": track.spotify_url ?? "",
+            ] as [String: Any]
         }
 
-        let userPlaysJSONData = try JSONEncoder().encode(userPlaysJSON)
-        let userPlaysJSONString = String(data: userPlaysJSONData, encoding: .utf8)!
-
-        let tracksJSONData = try JSONSerialization.data(withJSONObject: tracksJSON, options: [])
-        let tracksJSONString = String(data: tracksJSONData, encoding: .utf8)!
+        // Encode all data to JSON strings
+        let userPlaysJSONString = try encodeToJSONString(userPlaysJSON)
+        let tracksJSONString = try encodeToJSONString(unseenTracksJSON)
+        let artistsJSONString = try encodeToJSONString(unseenArtistsJSON)
 
         let dateFormatter = ISO8601DateFormatter()
         let response: BulkInsertResponse =
@@ -147,6 +178,7 @@ enum Database {
                     params: [
                         "user_plays_data": userPlaysJSONString,
                         "unseen_tracks_data": tracksJSONString,
+                        "unseen_artists_data": artistsJSONString,
                         "user_id": userID,
                         "current_fetch_ts": dateFormatter.string(from: currentFetchTs),
                     ]
@@ -160,7 +192,15 @@ enum Database {
         }
 
         print(
-            "Successfully inserted \(response.tracks_inserted) tracks and \(response.plays_inserted) plays"
+            "Successfully inserted artists: \(response.artists_inserted), tracks: \(response.tracks_inserted), links: \(response.links_inserted), plays: \(response.plays_inserted)"
         )
+    }
+
+    private static func encodeToJSONString(_ value: Any) throws -> String {
+        let jsonData = try JSONSerialization.data(withJSONObject: value, options: [])
+        guard let jsonString = String(data: jsonData, encoding: .utf8) else {
+            throw DatabaseError.unknownError(message: "Failed to encode JSON to string")
+        }
+        return jsonString
     }
 }

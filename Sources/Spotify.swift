@@ -7,7 +7,10 @@ struct SpotifyImage: Decodable {
 }
 
 struct SpotifyArtist: Decodable {
+    let id: String
     let name: String
+    let images: [SpotifyImage]?
+    let genres: [String]?
 }
 
 struct SpotifyAlbum: Decodable {
@@ -67,6 +70,10 @@ struct SpotifyRecentlyPlayedResponse: Decodable {
     let items: [SpotifyRecentlyPlayedItem]
 }
 
+struct SpotifyGetArtistsMultiResponse: Decodable {
+    let artists: [SpotifyArtist]
+}
+
 struct SpotifyGetTracksMultiResponse: Decodable {
     let tracks: [SpotifyItem]
 }
@@ -75,21 +82,3 @@ struct SpotifyErrorResponse: Decodable {
     let status: Int
     let message: String
 }
-
-// MARK: - Usage Example
-
-/*
- // Decoding example:
- let jsonData = // your JSON data from HTTP response
- do {
-     let decoder = JSONDecoder()
-     let recentlyPlayed = try decoder.decode(SpotifyRecentlyPlayedResponse.self, from: jsonData)
-     // Use the decoded data
-     for item in recentlyPlayed.items {
-         print("Track: \(item.track.name) by \(item.track.artists.first?.name ?? "Unknown")")
-         print("Played at: \(item.playedAt)")
-     }
- } catch {
-     print("Decoding error: \(error)")
- }
- */
