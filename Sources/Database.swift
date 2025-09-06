@@ -4,47 +4,60 @@ import Supabase
 enum DatabaseError: LocalizedError {
     case transactionFailed(errorDescription: String)
     case unknownError(message: String)
+    case encodingFailed(error: Error)
     var errorDescription: String? {
         switch self {
         case let .transactionFailed(errorDescription):
             return "Database transaction failed: \(errorDescription)"
         case let .unknownError(message):
             return "An unknown error occurred: \(message)"
+        case let .encodingFailed(error):
+            return "Failed to encode data to JSON: \(error.localizedDescription)"
         }
     }
 }
 
 enum Database {
-    struct Spotify: Decodable {
-        let Id: String // id  - UUID
-        let SpotifyUID: String? // spotify_user_id
-        let RefreshToken: String? // refresh_token
-        let TokenExpiry: String // token_expiry
+    struct Spotify: Codable {
+        let Id: String
+        let SpotifyUID: String?
+        let RefreshToken: String?
+        let TokenExpiry: String
         private enum CodingKeys: String, CodingKey {
-            case Id = "id"
-            case SpotifyUID = "spotify_user_id"
-            case RefreshToken = "refresh_token"
-            case TokenExpiry = "token_expiry"
+            case Id = "id", SpotifyUID = "spotify_user_id", RefreshToken = "refresh_token",
+                 TokenExpiry = "token_expiry"
         }
     }
 
-    struct BulkInsertResponse: Decodable {
+    struct BulkInsertResponse: Decodable, CustomStringConvertible {
         let status: String
         let error: String?
-        let artists_inserted: Int
-        let tracks_inserted: Int
-        let links_inserted: Int
-        let plays_inserted: Int
-        let message: String?
+        let artistsInserted: Int
+        let albumsInserted: Int
+        let tracksInserted: Int
+        let linksInserted: Int
+        let playsInserted: Int
+
+        private enum CodingKeys: String, CodingKey {
+            case status, error
+            case artistsInserted = "artists_inserted"
+            case albumsInserted = "albums_inserted"
+            case tracksInserted = "tracks_inserted"
+            case linksInserted = "links_inserted"
+            case playsInserted = "plays_inserted"
+        }
+
+        var description: String {
+            "artists: \(artistsInserted), albums: \(albumsInserted), tracks: \(tracksInserted), links: \(linksInserted), plays: \(playsInserted)"
+        }
     }
 
     struct Track: Encodable {
         let id: String
         let name: String
         let artists: [Artist]
-        let album_name: String
+        let album_id: String
         let duration_ms: Int
-        let album_cover_url: String?
         let spotify_url: String?
         let added_at: Date?
         let last_updated_at: Date?
@@ -55,6 +68,13 @@ enum Database {
         let name: String
         let image_url: String
         let genres: [String]
+    }
+
+    struct Album: Encodable {
+        let id: String
+        let artist_ids: [String] // only used for linking
+        let name: String
+        let image_url: String
     }
 
     struct UserSongPlay: Encodable {
@@ -91,98 +111,53 @@ enum Database {
         return rows.first?.plays_last_fetched.map { Int($0.timeIntervalSince1970 * 1000) }
     }
 
-    static func getExistingArtistIDs(client: SupabaseClient, artists: [String]) async throws
-        -> [String]
-    {
-        struct Response: Decodable {
-            let id: String
-        }
-        let rows: [Response] =
-            try await client
-                .from("artists")
-                .select("id")
-                .in("id", values: artists)
-                .execute()
-                .value
-        let existingIDs = Set(rows.map { $0.id })
-        return artists.filter { !existingIDs.contains($0) }
-    }
-
-    static func getExistingTrackIDs(client: SupabaseClient, tracks: [String]) async throws
-        -> [String]
-    {
-        struct Response: Decodable {
-            let id: String
-        }
-        let rows: [Response] =
-            try await client
-                .from("tracks")
-                .select("id")
-                .in("id", values: tracks)
-                .execute()
-                .value
-        let existingIDs = Set(rows.map { $0.id })
-        return tracks.filter { !existingIDs.contains($0) }
-    }
-
     static func insertUserSongPlays(
         client: SupabaseClient,
         userPlaysData: [UserSongPlay],
         unseenTracksData: [Track],
         unseenArtistsData: [Artist],
+        unseenAlbumsData: [Album],
         userID: String,
         currentFetchTs: Date
     ) async throws {
-        guard !userPlaysData.isEmpty || !unseenTracksData.isEmpty || !unseenArtistsData.isEmpty
+        guard
+            !userPlaysData.isEmpty || !unseenTracksData.isEmpty || !unseenArtistsData.isEmpty
+            || !unseenAlbumsData.isEmpty
         else {
-            print("No new data to insert")
+            print("No new data to insert for user \(userID)")
+            try await updateUserLastFetch(client: client, userID: userID, timestamp: currentFetchTs)
             return
         }
 
-        let userPlaysJSON = userPlaysData.map {
-            ["user_id": $0.user_id, "track_id": $0.track_id, "played_at": $0.played_at]
-        }
-
-        let unseenArtistsJSON = unseenArtistsData.map { artist in
-            [
-                "id": artist.id,
-                "name": artist.name,
-                "image_url": artist.image_url,
-                "genres": artist.genres,
-            ] as [String: Any]
-        }
-
-        let unseenTracksJSON = unseenTracksData.map { track in
-            let artistsPayload = track.artists.map { ["id": $0.id, "name": $0.name] }
-            return [
-                "id": track.id,
-                "name": track.name,
-                "artists": artistsPayload,
-                "album_name": track.album_name,
-                "duration_ms": track.duration_ms,
-                "album_cover_url": track.album_cover_url ?? "",
-                "spotify_url": track.spotify_url ?? "",
-            ] as [String: Any]
-        }
-
-        // Encode all data to JSON strings
-        let userPlaysJSONString = try encodeToJSONString(userPlaysJSON)
-        let tracksJSONString = try encodeToJSONString(unseenTracksJSON)
-        let artistsJSONString = try encodeToJSONString(unseenArtistsJSON)
+        let encoder = JSONEncoder()
+        let userPlaysJSON = try encoder.encode(userPlaysData)
+        let tracksJSON = try encoder.encode(unseenTracksData)
+        let artistsJSON = try encoder.encode(unseenArtistsData)
+        let albumsJSON = try encoder.encode(unseenAlbumsData)
 
         let dateFormatter = ISO8601DateFormatter()
+
+        struct RpcParams: Encodable {
+            let user_plays_data: String
+            let unseen_tracks_data: String
+            let unseen_artists_data: String
+            let unseen_albums_data: String
+            let user_id: String
+            let current_fetch_ts: String
+        }
+
+        let params = RpcParams(
+            user_plays_data: String(data: userPlaysJSON, encoding: .utf8)!,
+            unseen_tracks_data: String(data: tracksJSON, encoding: .utf8)!,
+            unseen_artists_data: String(data: artistsJSON, encoding: .utf8)!,
+            unseen_albums_data: String(data: albumsJSON, encoding: .utf8)!,
+            user_id: userID,
+            current_fetch_ts: dateFormatter.string(from: currentFetchTs)
+        )
+
         let response: BulkInsertResponse =
             try await client
-                .rpc(
-                    "insert_user_song_plays_with_tracks",
-                    params: [
-                        "user_plays_data": userPlaysJSONString,
-                        "unseen_tracks_data": tracksJSONString,
-                        "unseen_artists_data": artistsJSONString,
-                        "user_id": userID,
-                        "current_fetch_ts": dateFormatter.string(from: currentFetchTs),
-                    ]
-                )
+                .rpc("insert_user_song_plays_with_tracks", params: params)
                 .execute()
                 .value
 
@@ -191,16 +166,16 @@ enum Database {
             throw DatabaseError.transactionFailed(errorDescription: err)
         }
 
-        print(
-            "Successfully inserted artists: \(response.artists_inserted), tracks: \(response.tracks_inserted), links: \(response.links_inserted), plays: \(response.plays_inserted)"
-        )
+        print("Successfully inserted for user \(userID): \(response.description)")
     }
 
-    private static func encodeToJSONString(_ value: Any) throws -> String {
-        let jsonData = try JSONSerialization.data(withJSONObject: value, options: [])
-        guard let jsonString = String(data: jsonData, encoding: .utf8) else {
-            throw DatabaseError.unknownError(message: "Failed to encode JSON to string")
-        }
-        return jsonString
+    private static func updateUserLastFetch(client: SupabaseClient, userID: String, timestamp: Date)
+        async throws
+    {
+        try await client
+            .from("spotify")
+            .update(["plays_last_fetched": timestamp])
+            .eq("id", value: userID)
+            .execute()
     }
 }

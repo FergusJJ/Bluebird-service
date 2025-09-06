@@ -1,28 +1,37 @@
+import Combine
 import Foundation
 
-struct SpotifyImage: Decodable {
+struct SpotifyImage: Decodable, Encodable, Hashable {
     let url: String
-    let height: Int
-    let width: Int
+    let height: Int?
+    let width: Int?
 }
 
-struct SpotifyArtist: Decodable {
+struct SpotifyArtist: Decodable, Encodable, Hashable {
     let id: String
     let name: String
     let images: [SpotifyImage]?
     let genres: [String]?
+
+    static func == (lhs: SpotifyArtist, rhs: SpotifyArtist) -> Bool { lhs.id == rhs.id }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
-struct SpotifyAlbum: Decodable {
-    let images: [SpotifyImage]
+struct SpotifyAlbum: Decodable, Encodable, Hashable {
+    let id: String
     let name: String
+    let images: [SpotifyImage]
+    let artists: [SpotifyArtist]
+
+    static func == (lhs: SpotifyAlbum, rhs: SpotifyAlbum) -> Bool { lhs.id == rhs.id }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
-struct SpotifyExternalURLs: Decodable {
+struct SpotifyExternalURLs: Decodable, Encodable, Hashable {
     let spotify: String
 }
 
-struct SpotifyItem: Decodable {
+struct SpotifyItem: Decodable, Encodable, Hashable {
     let name: String
     let artists: [SpotifyArtist]
     let album: SpotifyAlbum
@@ -37,23 +46,9 @@ struct SpotifyItem: Decodable {
         case durationMs = "duration_ms"
         case externalUrls = "external_urls"
     }
-}
 
-struct SpotifyCurrentlyPlayingResponse: Decodable {
-    let item: SpotifyItem?
-    let currentlyPlayingType: String
-    let isPlaying: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case item
-        case currentlyPlayingType = "currently_playing_type"
-        case isPlaying = "is_playing"
-    }
-}
-
-struct TrackIDPlayedAt: Decodable {
-    let trackIDs: [String]
-    let playedAt: [Int]
+    static func == (lhs: SpotifyItem, rhs: SpotifyItem) -> Bool { lhs.id == rhs.id }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
 }
 
 struct SpotifyRecentlyPlayedItem: Decodable {
@@ -76,6 +71,10 @@ struct SpotifyGetArtistsMultiResponse: Decodable {
 
 struct SpotifyGetTracksMultiResponse: Decodable {
     let tracks: [SpotifyItem]
+}
+
+struct SpotifyErrorContainer: Decodable {
+    let error: SpotifyErrorResponse
 }
 
 struct SpotifyErrorResponse: Decodable {

@@ -2,21 +2,6 @@ import ArgumentParser
 import Foundation
 import Supabase
 
-/*
-
- Need to:
- - Connect to db
- - For each user:
-     - get refresh token, last fetched time
-     - get new access token
-     - use access token to get 50 songs
-     - insert songs into db
-     - update the last fetched time
-     - end
- -
-
- */
-
 enum BluebirdServiceError: LocalizedError {
     case missingRefreshToken
     case invalidURLComponents(url: URL)
@@ -108,7 +93,7 @@ struct BluebirdService: AsyncParsableCommand {
 
         guard let actualSupabaseURL = URL(string: supabaseURL) else {
             print("Error: Invalid SUPABASE_URL format.")
-            return // or throw an error
+            return
         }
 
         let client = SupabaseClient(
@@ -132,7 +117,7 @@ struct BluebirdService: AsyncParsableCommand {
             print("Error fetching Spotify profiles: \(error)")
             return
         }
-        // user_song_plays uses id as key so need dict of id:accessToken
+
         var UserIdAccessToken: [String: String?] = [:]
         await withTaskGroup(of: (String, String?).self) { group in
             for profile in spotifyProfiles {
@@ -160,7 +145,7 @@ struct BluebirdService: AsyncParsableCommand {
                     continue
                 }
                 group.addTask {
-                    await updateUserSongs(
+                    await processUserSongs(
                         client: client, clientID: clientID, clientAccessToken: clientAccessToken
                     )
                 }
@@ -168,133 +153,117 @@ struct BluebirdService: AsyncParsableCommand {
         }
     }
 
-    private func updateUserSongs(
+    private func processUserSongs(
         client: SupabaseClient, clientID: String, clientAccessToken: String
     ) async {
-        guard
-            let lastPlayedMillis = try? await Database.getLastPlayedTimestamp(
+        let now = Date()
+        do {
+            let lastPlayedMillis = try await Database.getLastPlayedTimestamp(
                 client: client, clientID: clientID
             )
-        else {
-            print("Error fetching plays_last_fetched \(clientAccessToken)")
-            return
-        }
-        let now = Date()
-        let trackIDsPlayedAt: [(String, String)]
-        let trackIDs: [String]
-        let artistIDs: [String]
-        do {
-            let result = try await getRecentlyPlayedTracks(
+
+            /*
+                 What we get from recentlyPlayed:
+
+                 Artists: (simplifiedArtist)
+                     - id
+                     - name
+                     NEED: genres, images
+                Tracks:
+                    - id
+                    - name
+                    - duration
+                    - url
+                    - album.id
+                Albums:
+                    - id
+                    - name
+                    - image
+
+             */
+
+            let recentlyPlayedResult = try await getRecentlyPlayedTracks(
                 clientAccessToken: clientAccessToken,
-                lastPlayedMillis: lastPlayedMillis
+                lastPlayedMillis: lastPlayedMillis ?? 0
             )
-            switch result {
-            case let .success(recentlyPlayedTracks):
-                var seenTrackIDs = Set<String>()
-                trackIDsPlayedAt = recentlyPlayedTracks.items.compactMap { item in
-                    (item.track.id, item.playedAt)
-                }
-                trackIDs = recentlyPlayedTracks.items.compactMap { item in
-                    seenTrackIDs.insert(item.track.id).inserted ? item.track.id : nil
-                }
-                artistIDs = Array(
-                    Set(recentlyPlayedTracks.items.flatMap { $0.track.artists }.map { $0.id }))
-            case let .failure(error):
-                print(error.localizedDescription)
+
+            guard case let .success(recentlyPlayedResponse) = recentlyPlayedResult,
+                  !recentlyPlayedResponse.items.isEmpty
+            else {
+                print("No new tracks to process for user \(clientID).")
+                try await Database.insertUserSongPlays(
+                    client: client, userPlaysData: [], unseenTracksData: [], unseenArtistsData: [],
+                    unseenAlbumsData: [], userID: clientID, currentFetchTs: now
+                )
                 return
             }
-        } catch {
-            print(error)
-            return
-        }
 
-        let unseenTrackIDs: String
-        do {
-            let unseenTrackIDSArr = try await Database.getExistingTrackIDs(
-                client: client, tracks: trackIDs
-            )
-            unseenTrackIDs = unseenTrackIDSArr.joined(separator: ",")
-        } catch {
-            print("Error fetching existing trackIDs \(error.localizedDescription)")
-            return
-        }
+            // get unique entries, for insertion into respective table
+            let allTracks = Set(recentlyPlayedResponse.items.map { $0.track })
+            let allAlbums = Set(allTracks.map { $0.album })
+            let allArtists = Set(
+                allTracks.flatMap { $0.artists } + allAlbums.flatMap { $0.artists })
 
-        let unseenArtistIDs: String
-        do {
-            let unseenArtistIDsArr = try await Database.getExistingArtistIDs(
-                client: client, artists: artistIDs
+            let userSongPlays = prepareUserSongPlaysData(
+                spotifyResponse: recentlyPlayedResponse.items, userId: clientID
             )
-            unseenArtistIDs = unseenArtistIDsArr.joined(separator: ",")
-        } catch {
-            print("Error fetching existing artistIDs \(error.localizedDescription)")
-            return
-        }
 
-        let tracks: [SpotifyItem]
-        do {
-            let result = try await getTrackDataMulti(
-                accessToken: clientAccessToken, trackIDs: unseenTrackIDs
-            )
-            switch result {
-            case let .success(isTrackData):
-                guard let trackData = isTrackData else {
-                    tracks = []
-                    break
+            var artistsToInsert: [Database.Artist] = []
+            if !allArtists.isEmpty {
+                let artistIds = allArtists.map { $0.id }.joined(separator: ",")
+                let getArtistsResult = try await getArtistDataMulti(
+                    accessToken: clientAccessToken, artistIDs: artistIds
+                )
+                if case let .success(getArtistsResult) = getArtistsResult,
+                   !getArtistsResult.artists.isEmpty
+                {
+                    artistsToInsert = prepareArtistsData(spotifyResponse: getArtistsResult.artists)
+                } else {
+                    print("No new artists to process")
                 }
-                tracks = trackData.tracks.map { $0 }
-            case let .failure(error):
-                print(error.localizedDescription)
-                return
             }
-        } catch {
-            print(error)
-            return
-        }
 
-        let artists: [SpotifyArtist]
-        do {
-            let result = try await getArtistDataMulti(
-                accessToken: clientAccessToken, artistIDs: unseenArtistIDs
-            )
-            switch result {
-            case let .success(isArtistData):
-                guard let artistData = isArtistData else {
-                    artists = []
-                    break
-                }
-                artists = artistData.artists.map { $0 }
-            case let .failure(error):
-                print(error.localizedDescription)
-                return
-            }
-        } catch {
-            print(error)
-            return
-        }
+            let tracksToInsert = prepareTracksData(spotifyResponse: Array(allTracks))
+            let albumsToInsert = prepareAlbumData(spotifyResponse: Array(allAlbums))
 
-        let userSongData = prepareUserSongPlaysData(
-            spotifyResponse: trackIDsPlayedAt, userId: clientID
-        )
-        let tracksData = prepareTracksData(spotifyResponse: tracks)
-        let artistsData = prepareArtistsData(spotifyResponse: artists)
-        do {
+            prettyPrint(artistsToInsert, label: "Artists to Insert")
+            prettyPrint(tracksToInsert, label: "Tracks to Insert")
+            prettyPrint(albumsToInsert, label: "Albums to Insert")
             try await Database.insertUserSongPlays(
-                client: client, userPlaysData: userSongData, unseenTracksData: tracksData,
-                unseenArtistsData: artistsData,
-                userID: clientID, currentFetchTs: now
+                client: client,
+                userPlaysData: userSongPlays,
+                unseenTracksData: tracksToInsert,
+                unseenArtistsData: artistsToInsert,
+                unseenAlbumsData: albumsToInsert,
+                userID: clientID,
+                currentFetchTs: now
             )
+
         } catch {
-            print(error)
+            print("Failed to process songs for user \(clientID): \(error.localizedDescription)")
             return
         }
     }
 
-    private func getArtistDataMulti(accessToken: String, artistIDs: String) async throws -> Result<
-        SpotifyGetArtistsMultiResponse?, BluebirdServiceError
-    > {
-        guard !artistIDs.isEmpty else {
-            return .success(nil)
+    func prettyPrint<T: Encodable>(_ object: T, label: String) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .prettyPrinted
+        encoder.dateEncodingStrategy = .iso8601
+
+        do {
+            let data = try encoder.encode(object)
+            if let jsonString = String(data: data, encoding: .utf8) {
+                print("\n=== \(label) ===")
+                print(jsonString)
+            }
+        } catch {
+            print("Failed to encode \(label): \(error)")
         }
+    }
+
+    private func getArtistDataMulti(accessToken: String, artistIDs: String) async throws -> Result<
+        SpotifyGetArtistsMultiResponse, BluebirdServiceError
+    > {
         var request: URLRequest
         do {
             request =
@@ -597,15 +566,26 @@ struct BluebirdService: AsyncParsableCommand {
         return request
     }
 
-    func prepareUserSongPlaysData(spotifyResponse: [(String, String)], userId: String)
+    func prepareUserSongPlaysData(spotifyResponse: [SpotifyRecentlyPlayedItem], userId: String)
         -> [Database.UserSongPlay]
     {
-        return spotifyResponse.compactMap { item in
+        return spotifyResponse.map { item in
             Database.UserSongPlay(
-                play_id: nil, // handled by supabase
+                play_id: nil,
                 user_id: userId,
-                track_id: item.0,
-                played_at: item.1
+                track_id: item.track.id,
+                played_at: item.playedAt
+            )
+        }
+    }
+
+    func prepareAlbumData(spotifyResponse: [SpotifyAlbum]) -> [Database.Album] {
+        return spotifyResponse.map { album in
+            Database.Album(
+                id: album.id,
+                artist_ids: Array(album.artists.map { $0.id }),
+                name: album.name,
+                image_url: album.images.first?.url ?? ""
             )
         }
     }
@@ -622,25 +602,19 @@ struct BluebirdService: AsyncParsableCommand {
     }
 
     func prepareTracksData(spotifyResponse: [SpotifyItem]) -> [Database.Track] {
-        return spotifyResponse.compactMap { track in
+        return spotifyResponse.map { track in
             let databaseArtists = track.artists.map { artist in
-                Database.Artist(
-                    id: artist.id,
-                    name: artist.name,
-                    image_url: "",
-                    genres: []
-                )
+                // The SQL function only needs artist IDs inside the track object.
+                // dont even really need the name here
+                Database.Artist(id: artist.id, name: artist.name, image_url: "", genres: [])
             }
-            let albumCoverURL = track.album.images.first?.url
-            let spotifyURL = track.externalUrls.spotify
             return Database.Track(
                 id: track.id,
                 name: track.name,
                 artists: databaseArtists,
-                album_name: track.album.name,
+                album_id: track.album.id,
                 duration_ms: track.durationMs,
-                album_cover_url: albumCoverURL,
-                spotify_url: spotifyURL,
+                spotify_url: track.externalUrls.spotify,
                 added_at: nil,
                 last_updated_at: nil
             )
