@@ -178,4 +178,46 @@ enum Database {
             .eq("id", value: userID)
             .execute()
     }
+
+    static func updateUserPlayCounts(client: SupabaseClient) async throws -> Int {
+        struct Response: Decodable {
+            let rows_affected: Int
+        }
+
+        let response: [Response] =
+            try await client
+                .rpc("update_user_play_counts")
+                .execute()
+                .value
+
+        return response.first?.rows_affected ?? 0
+    }
+
+    static func updateUserTrackCounts(client: SupabaseClient) async throws -> Int {
+        struct Response: Decodable {
+            let rows_affected: Int
+        }
+
+        let response: [Response] =
+            try await client
+                .rpc("update_user_track_counts")
+                .execute()
+                .value
+
+        return response.first?.rows_affected ?? 0
+    }
+
+    static func updateUserWeeklyPlays(client: SupabaseClient) async throws -> Int {
+        struct Response: Decodable {
+            let rows_affected: Int
+        }
+
+        let response: [Response] =
+            try await client
+                .rpc("update_user_weekly_plays")
+                .execute()
+                .value
+
+        return response.first?.rows_affected ?? 0
+    }
 }
