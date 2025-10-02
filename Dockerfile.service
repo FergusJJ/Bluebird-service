@@ -7,7 +7,9 @@ COPY Package.swift Package.resolved ./
 RUN swift package resolve
 
 COPY Sources ./Sources
+
 RUN swift build -c release
+
 FROM swift:6.1-slim
 
 WORKDIR /app
@@ -16,4 +18,12 @@ COPY --from=builder /app/.build/release/BluebirdService ./BluebirdService
 
 RUN chmod +x ./BluebirdService
 
-CMD ["./BluebirdService"]
+RUN echo '#!/bin/sh\n\
+while true; do\n\
+  echo "Running tracks job at $(date)"\n\
+  ./BluebirdService tracks --apikey "$SUPABASE_SERVICE_ROLE_KEY"\n\
+  echo "Sleeping for 1 hour..."\n\
+  sleep 3600\n\
+done' > /app/start.sh && chmod +x /app/start.sh
+
+CMD ["/app/start.sh"]
