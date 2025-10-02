@@ -1,0 +1,19 @@
+FROM swift:6.0 AS builder
+
+WORKDIR /app
+
+COPY Package.swift Package.resolved ./
+
+RUN swift package resolve
+
+COPY Sources ./Sources
+RUN swift build -c release
+FROM swift:6.0-slim
+
+WORKDIR /app
+
+COPY --from=builder /app/.build/release/BluebirdService ./BluebirdService
+
+RUN chmod +x ./BluebirdService
+
+CMD ["./BluebirdService"]
