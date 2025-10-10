@@ -86,7 +86,9 @@ enum SupabaseClientFactory {
 struct BluebirdService: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Bluebird Service for Spotify integration",
-        subcommands: [UserTracksCommand.self, UserCountsCommand.self],
+        subcommands: [
+            UserTracksCommand.self, UserCountsCommand.self, UserCurrentlyPlayingCommand.self,
+        ],
         defaultSubcommand: UserTracksCommand.self
     )
 
