@@ -1,5 +1,8 @@
 import ArgumentParser
 import Foundation
+#if canImport(FoundationNetworking)
+    import FoundationNetworking
+#endif
 @preconcurrency import NIOCore
 @preconcurrency import NIOPosix
 @preconcurrency import NIOSSL
