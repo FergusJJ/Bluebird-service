@@ -1,0 +1,29 @@
+FROM swift:6.1 AS builder
+
+WORKDIR /app
+
+COPY Package.swift Package.resolved ./
+
+RUN swift package resolve
+
+COPY Sources ./Sources
+
+RUN swift build -c release
+
+FROM swift:6.1-slim
+
+WORKDIR /app
+
+COPY --from=builder /app/.build/release/BluebirdService ./BluebirdService
+
+RUN chmod +x ./BluebirdService
+
+RUN echo '#!/bin/sh\n\
+while true; do\n\
+  echo "Running UCP job at $(date)"\n\
+  ./BluebirdService ucp --redis-host "$REDIS_HOST" --redis-port "$REDIS_PORT" --redis-password "$REDIS_PASSWORD"\n\
+  echo "Sleeping for 2 mins..."\n\
+  sleep 120\n\
+done' > /app/start.sh && chmod +x /app/start.sh
+
+CMD ["/app/start.sh"]

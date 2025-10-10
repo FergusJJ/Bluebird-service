@@ -12,6 +12,8 @@ let package = Package(
             url: "https://github.com/supabase/supabase-swift.git",
             from: "2.0.0"
         ),
+        .package(url: "https://github.com/swift-server/RediStack.git", from: "1.4.1"),
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.0.0"),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -24,6 +26,8 @@ let package = Package(
                     name: "Supabase", // Auth, Realtime, Postgrest, Functions, or Storage
                     package: "supabase-swift"
                 ),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+                .product(name: "RediStack", package: "RediStack"),
             ],
             path: "Sources"
         ),
