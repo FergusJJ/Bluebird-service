@@ -22,8 +22,8 @@ RUN echo '#!/bin/sh\n\
 while true; do\n\
   echo "Running UCP job at $(date)"\n\
   ./BluebirdService ucp --redis-host "$REDIS_HOST" --redis-port "$REDIS_PORT" --redis-password "$REDIS_PASSWORD"\n\
-  echo "Sleeping for 2 mins..."\n\
-  sleep 120\n\
+  echo "Sleeping for 1 mins..."\n\
+  sleep 60\n\
 done' > /app/start.sh && chmod +x /app/start.sh
 
 CMD ["/app/start.sh"]
